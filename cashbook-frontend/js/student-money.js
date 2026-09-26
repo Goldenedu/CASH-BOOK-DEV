@@ -1025,15 +1025,21 @@ async function openStudentStatementModal(studentId) {
   await loadStudentStatementData();
 }
 
+// ==============================================================================
+// 💡 STATEMENT DATA LOADER (ENTERPRISE EDITION WITH ZERO-RECORD HEADER GUARD)
+// ==============================================================================
 async function loadStudentStatementData() {
   if (!gStmtStudentId) return;
 
   const dateFrom = document.getElementById('stm-stmt-date-from')?.value || '';
   const dateTo = document.getElementById('stm-stmt-date-to')?.value || '';
+  const nameEl = document.getElementById('stm-stmt-student-name');
+  const infoEl = document.getElementById('stm-stmt-student-info');
 
   try {
     if (typeof toggleLoading === 'function') toggleLoading(true);
 
+    // 🚀 D1 Quota Optimized: Read strictly 20 rows per page
     const res = await callApi('getStudentMoneyData', {
       studentId: gStmtStudentId,
       page: gStmtPage,
@@ -1047,52 +1053,87 @@ async function loadStudentStatementData() {
       const records = res.data || [];
       gStmtTotalRows = res.totalRows || 0;
 
-      const nameEl = document.getElementById('stm-stmt-student-name');
-      const infoEl = document.getElementById('stm-stmt-student-info');
+      // 🎯 1. HEADER PRESERVATION GUARD: Record မရှိသည့် ရက်စွဲစစ်ချိန်တွင်လည်း ကျောင်းသားအမည် မပျောက်စေရန် စီမံခြင်း
       if (records.length > 0) {
         const firstRow = records[0];
-        if (nameEl) nameEl.textContent = `${firstRow.fyidName} - Pocket Money Statement`;
-        if (infoEl) infoEl.textContent = `FY: ${firstRow.fy} | Class: ${firstRow.class} | ID: ${firstRow.studentId}`;
+        if (nameEl) nameEl.textContent = `${firstRow.fyidName || firstRow.fyid || 'Student'} - Pocket Money Statement`;
+        if (infoEl) infoEl.textContent = `FY: ${firstRow.fy || '-'} | Class: ${firstRow.class || '-'} | ID: ${firstRow.studentId || gStmtStudentId}`;
+      } else {
+        // စာရင်းမရှိပါက Cache သို့မဟုတ် Single Lookup မှတစ်ဆင့် ကျောင်းသားအချက်အလက်ကို ဆွဲတင်ထိန်းသိမ်းခြင်း
+        const currentFy = (typeof window.getCurrentAcademicYear === 'function') ? window.getCurrentAcademicYear() : '2026-2027';
+        const cacheList = gStudentCacheForMoney[currentFy] || [];
+        const cachedStu = cacheList.find(s => parseInt(s.studentId || s.student_id || s.id, 10) === parseInt(gStmtStudentId, 10));
+
+        if (cachedStu) {
+          const cleanFyid = typeof window.sanitizeFyidStr === 'function' ? window.sanitizeFyidStr(cachedStu.fyid) : (cachedStu.fyid || '');
+          if (nameEl) nameEl.textContent = `[${cleanFyid}] ${cachedStu.name || 'Student'} - Pocket Money Statement`;
+          if (infoEl) infoEl.textContent = `FY: ${currentFy} | Class: ${cachedStu.class || '-'} | ID: ${gStmtStudentId}`;
+        } else if (nameEl && !nameEl.textContent.includes('Statement')) {
+          if (nameEl) nameEl.textContent = `Student ID: ${gStmtStudentId} - Pocket Money Statement`;
+          if (infoEl) infoEl.textContent = `FY: ${currentFy} | ID: ${gStmtStudentId}`;
+        }
       }
 
+      // 🎯 2. PLAN 3 ACCOUNTING STATS MAPPING
       const stats = res.stats || {};
       const depEl = document.getElementById('stm-stmt-total-deposit');
       const withEl = document.getElementById('stm-stmt-total-withdraw');
       const balEl = document.getElementById('stm-stmt-current-balance');
 
-      if (depEl) depEl.textContent = `${Number(stats.totalIncome || 0).toLocaleString('en-US')} MMK`;
-      if (withEl) withEl.textContent = `${Number(stats.totalExpense || 0).toLocaleString('en-US')} MMK`;
-      if (balEl) balEl.textContent = `${Number(stats.balance || 0).toLocaleString('en-US')} MMK`;
+      const periodIncome = Number(stats.totalIncome || 0);
+      const periodExpense = Number(stats.totalExpense || 0);
+      const allTimeBal = Number(stats.balance || 0);
 
+      if (depEl) depEl.textContent = `${periodIncome.toLocaleString('en-US')} MMK`;
+      if (withEl) withEl.textContent = `${periodExpense.toLocaleString('en-US')} MMK`;
+      if (balEl) balEl.textContent = `${allTimeBal.toLocaleString('en-US')} MMK`;
+
+      // 🎯 3. TABLE BODY RENDERING (WITH EXACT ESCAPING & ROW NUMBERING)
       const tbody = document.getElementById('stm-stmt-table-body');
       if (tbody) {
         tbody.innerHTML = '';
         if (records.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="7" class="text-center py-6 text-slate-500 font-bold">ရွေးချယ်ထားသော ရက်အတွင်း မှတ်တမ်း မရှိပါ။</td></tr>`;
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="7" class="text-center py-8 text-slate-500 font-bold">
+                <i class="fa-solid fa-calendar-xmark text-slate-600 text-base mb-1 block"></i>
+                ရွေးချယ်ထားသော ရက်အတွင်း မှတ်တမ်း မရှိပါ။
+              </td>
+            </tr>
+          `;
         } else {
+          const safeEsc = window.escapeHtml || (s => s ? String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) : '');
+
           records.forEach((r, idx) => {
+            // အသစ်ဆုံးစာရင်းအား နံပါတ်အကြီးဆုံးဖြင့် စဉ်ပြသခြင်း
             const displayNo = gStmtTotalRows - ((gStmtPage - 1) * gStmtLimit + idx);
-            const balStr = Number(r.balances || 0).toLocaleString('en-US', {minimumFractionDigits: 2});
+            const balStr = Number(r.balances || 0).toLocaleString('en-US', { minimumFractionDigits: 2 });
+            const deb = Number(r.debit || 0);
+            const cred = Number(r.credit || 0);
 
             tbody.innerHTML += `
-              <tr class="hover:bg-slate-800/30 text-xs">
+              <tr class="hover:bg-slate-800/30 text-xs border-b border-slate-800/30 transition-colors">
                 <td class="text-center font-mono py-2.5 px-3 font-bold text-slate-400">${displayNo}</td>
-                <td class="font-mono py-2.5 px-3 text-slate-300">${esc(r.date)}</td>
-                <td class="py-2.5 px-3 font-semibold">${esc(r.method)}</td>
-                <td class="text-right font-mono font-bold text-emerald-400 py-2.5 px-3">${r.debit > 0 ? Number(r.debit).toLocaleString('en-US') : '-'}</td>
-                <td class="text-right font-mono font-bold text-rose-400 py-2.5 px-3">${r.credit > 0 ? Number(r.credit).toLocaleString('en-US') : '-'}</td>
+                <td class="font-mono py-2.5 px-3 text-slate-300">${safeEsc(r.date)}</td>
+                <td class="py-2.5 px-3 font-semibold text-slate-300">${safeEsc(r.method || 'Cash')}</td>
+                <td class="text-right font-mono font-bold text-emerald-400 py-2.5 px-3">${deb > 0 ? deb.toLocaleString('en-US') : '-'}</td>
+                <td class="text-right font-mono font-bold text-rose-400 py-2.5 px-3">${cred > 0 ? cred.toLocaleString('en-US') : '-'}</td>
                 <td class="text-right font-mono font-bold text-indigo-400 py-2.5 px-3">${balStr}</td>
-                <td class="py-2.5 px-3 text-slate-400 truncate max-w-xs" title="${esc(r.remark)}">${esc(r.remark || '-')}</td>
+                <td class="py-2.5 px-3 text-slate-400 truncate max-w-xs" title="${safeEsc(r.remark)}">${safeEsc(r.remark || '-')}</td>
               </tr>
             `;
           });
         }
       }
 
+      // 🎯 4. PAGINATION CONTROLS SYNC
       updateStmtPaginationControls();
     }
   } catch (err) {
     console.error("Statement Load Error:", err);
+    if (typeof showToast === 'function') {
+      showToast("ERROR", "Statement စာရင်း ဆွဲယူရာတွင် အမှားဖြစ်ပေါ်ခဲ့သည်: " + err.message);
+    }
   } finally {
     if (typeof toggleLoading === 'function') toggleLoading(false);
   }
